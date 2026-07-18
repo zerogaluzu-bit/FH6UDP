@@ -1,0 +1,11 @@
+{
+  "host": "0.0.0.0",
+  "port": 9999,
+  "output_dir": "captures",
+  "receiver_url": "http://192.168.1.20:8765/api/v1/captures",
+  "auth_token_env": "FH6_UPLOAD_TOKEN",
+  "duration": null,
+  "no_upload": false,
+  "http_timeout": 30,
+  "verbose": false
+}

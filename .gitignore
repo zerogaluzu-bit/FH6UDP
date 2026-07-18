@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+captures/
+mock_receiver_store/
+config.json
+*.log
+.DS_Store

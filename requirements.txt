@@ -1,0 +1,4 @@
+# FH6 Windows collector uses Python 3.11+ standard library only.
+# No third-party packages are required.
+# Install Python from https://www.python.org/downloads/ or winget:
+#   winget install Python.Python.3.12
