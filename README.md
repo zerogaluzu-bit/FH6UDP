@@ -23,7 +23,7 @@ The Mac side owns binary packet parsing and all coaching logic. Windows must not
 
 ## 2. Install
 
-Requirements: **Python 3.11+** on Windows 10/11.
+Requirements: **Python 3.11+** on Windows 10/11 (includes `tkinter` for the GUI).
 
 ```powershell
 cd C:\Users\Administrator\FH6UDP
@@ -37,6 +37,15 @@ Optional: copy and edit config:
 copy config.example.json config.json
 ```
 
+### GUI (recommended on Windows)
+
+```powershell
+python udp_listener_gui.py
+```
+
+Or double-click `Start GUI.bat`.
+
+The GUI uses the same capture/upload engine as the CLI. Settings (except the auth token) are saved to `gui_settings.json`. The token field is memory-only and never written to disk.
 ## 3. Forza Horizon 6 Data Out setup
 
 In FH6 HUD / Telemetry settings (wording varies by build):
@@ -268,7 +277,9 @@ python -m unittest discover -s tests -v
 
 | File | Role |
 |------|------|
-| `udp_listener.py` | Main Windows collector |
+| `udp_listener.py` | Main Windows collector (CLI) |
+| `udp_listener_gui.py` | Windows GUI (tkinter) |
+| `Start GUI.bat` | Double-click launcher for the GUI |
 | `capture_format.py` | Binary container + manifest helpers |
 | `upload_queue.py` | HTTP multipart upload + retry queue |
 | `verify_capture.py` | Container verifier |

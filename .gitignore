@@ -6,5 +6,6 @@ venv/
 captures/
 mock_receiver_store/
 config.json
+gui_settings.json
 *.log
 .DS_Store

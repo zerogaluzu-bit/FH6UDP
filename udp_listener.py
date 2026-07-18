@@ -16,9 +16,10 @@ import select
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from capture_format import (
     MANIFEST_FILENAME,
@@ -59,11 +60,15 @@ def load_config(path: Optional[Path]) -> dict[str, Any]:
 
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    logging.getLogger("fh6").setLevel(level)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -231,7 +236,20 @@ class CaptureSession:
         return self.session_dir
 
 
-def run_listener(args: argparse.Namespace) -> int:
+def run_listener(
+    args: argparse.Namespace,
+    *,
+    stop_event: Optional[threading.Event] = None,
+    on_status: Optional[Callable[[dict[str, Any]], None]] = None,
+    install_signal_handlers: bool = True,
+) -> int:
+    """
+    Run one capture session.
+
+    stop_event: when set, flush/close and exit (used by GUI Stop button).
+    on_status: optional callback with live stats dict.
+    install_signal_handlers: False when embedded in GUI (avoids fighting the UI).
+    """
     setup_logging(args.verbose)
     log.info(
         "FH6 UDP collector v%s starting (Python %s, %s)",
@@ -268,6 +286,8 @@ def run_listener(args: argparse.Namespace) -> int:
         log.error("failed to bind UDP %s:%s: %s", args.host, args.port, e)
         if worker:
             worker.stop()
+        if on_status:
+            on_status({"state": "error", "message": f"bind failed: {e}"})
         return 1
     sock.setblocking(False)
     log.info("UDP listening on %s:%s", args.host, args.port)
@@ -281,14 +301,17 @@ def run_listener(args: argparse.Namespace) -> int:
         if not stop["flag"]:
             log.info("stop requested; flushing capture...")
         stop["flag"] = True
+        if stop_event is not None:
+            stop_event.set()
 
-    # Windows: SIGINT works for Ctrl+C; SIGTERM may not exist on all builds
-    signal.signal(signal.SIGINT, request_stop)
-    if hasattr(signal, "SIGTERM"):
-        try:
-            signal.signal(signal.SIGTERM, request_stop)
-        except Exception:
-            pass
+    if install_signal_handlers:
+        # Windows: SIGINT works for Ctrl+C; SIGTERM may not exist on all builds
+        signal.signal(signal.SIGINT, request_stop)
+        if hasattr(signal, "SIGTERM"):
+            try:
+                signal.signal(signal.SIGTERM, request_stop)
+            except Exception:
+                pass
 
     deadline = None
     if args.duration is not None:
@@ -296,16 +319,34 @@ def run_listener(args: argparse.Namespace) -> int:
         log.info("will stop after %.3f seconds", float(args.duration))
 
     packets_this_session = 0
+    if on_status:
+        on_status(
+            {
+                "state": "listening",
+                "session_id": session.session_id,
+                "session_dir": str(session.session_dir),
+                "packet_count": 0,
+                "total_payload_bytes": 0,
+                "host": args.host,
+                "port": args.port,
+            }
+        )
+
     try:
         while not stop["flag"]:
+            if stop_event is not None and stop_event.is_set():
+                if not stop["flag"]:
+                    log.info("stop requested; flushing capture...")
+                stop["flag"] = True
+                break
             if deadline is not None and time.monotonic() >= deadline:
                 log.info("duration elapsed")
                 break
-            # Short select timeout so Ctrl+C / duration are responsive
+            # Short select timeout so Ctrl+C / duration / GUI stop are responsive
             try:
                 readable, _, _ = select.select([sock], [], [], 0.25)
             except (InterruptedError, OSError):
-                if stop["flag"]:
+                if stop["flag"] or (stop_event is not None and stop_event.is_set()):
                     break
                 continue
             if not readable:
@@ -315,13 +356,30 @@ def run_listener(args: argparse.Namespace) -> int:
             except BlockingIOError:
                 continue
             except OSError as e:
-                if stop["flag"]:
+                if stop["flag"] or (stop_event is not None and stop_event.is_set()):
                     break
                 log.warning("recvfrom error (continuing): %s", e)
                 continue
             try:
                 session.record(data, addr)
                 packets_this_session += 1
+                if on_status and (
+                    packets_this_session == 1
+                    or packets_this_session % 25 == 0
+                ):
+                    on_status(
+                        {
+                            "state": "listening",
+                            "session_id": session.session_id,
+                            "session_dir": str(session.session_dir),
+                            "packet_count": session.writer.packet_count,
+                            "total_payload_bytes": session.writer.total_payload_bytes,
+                            "last_source": f"{addr[0]}:{addr[1]}",
+                            "last_payload_len": len(data),
+                            "host": args.host,
+                            "port": args.port,
+                        }
+                    )
                 if packets_this_session == 1 or packets_this_session % 500 == 0:
                     log.debug(
                         "recorded %d packets (last from %s:%s len=%d)",
@@ -334,12 +392,31 @@ def run_listener(args: argparse.Namespace) -> int:
                 session.app_dropped += 1
                 log.warning("failed to write packet (continuing): %s", e)
     finally:
+        if on_status:
+            on_status(
+                {
+                    "state": "closing",
+                    "session_id": session.session_id,
+                    "packet_count": session.writer.packet_count,
+                    "total_payload_bytes": session.writer.total_payload_bytes,
+                }
+            )
         try:
             sock.close()
         except Exception:
             pass
         session_dir = session.close(upload_pending=upload_enabled)
         if worker:
+            if on_status:
+                on_status(
+                    {
+                        "state": "uploading",
+                        "session_id": session.session_id,
+                        "session_dir": str(session_dir),
+                        "packet_count": session.writer.packet_count,
+                        "total_payload_bytes": session.writer.total_payload_bytes,
+                    }
+                )
             worker.enqueue_now(session_dir)
             # Give the queue a short chance to upload before exit
             try:
@@ -348,6 +425,26 @@ def run_listener(args: argparse.Namespace) -> int:
                 log.warning("final upload attempt failed: %s", e)
             worker.stop()
         log.info("collector stopped")
+        if on_status:
+            upload_status = None
+            try:
+                from capture_format import read_json
+
+                upload_status = read_json(session_dir / MANIFEST_FILENAME).get(
+                    "upload_status"
+                )
+            except Exception:
+                pass
+            on_status(
+                {
+                    "state": "stopped",
+                    "session_id": session.session_id,
+                    "session_dir": str(session_dir),
+                    "packet_count": session.writer.packet_count,
+                    "total_payload_bytes": session.writer.total_payload_bytes,
+                    "upload_status": upload_status,
+                }
+            )
     return 0
 
 
